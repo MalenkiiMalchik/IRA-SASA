@@ -1,0 +1,671 @@
+---
+title: "IRA - Supervised Aggregate Sentiment Analysis"
+author: "Alex Richardson"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+require(tidyverse)
+require(lubridate)
+require(here)
+require(skimr)
+require(caret)
+require(ranger)
+require(recipes)
+require(VA)
+require(ReadMe) # Use fix(undergrad) and remove the extra quotes on lines 36, 37, 40, and 41.
+require(reticulate)
+require(rvest)
+```
+
+```{python}
+
+x = 1
+print(x)
+
+# This just tests to make sure reticulate is working.
+
+```
+
+```{r Scraping usernames and karmas}
+
+raw = read_html("https://www.reddit.com/wiki/suspiciousaccounts")
+table = raw %>% 
+  html_nodes(.,xpath="/html/body/div[1]/div/div/div/div[2]/div/div/div/div[2]/div[3]/div[1]/div[3]/div/div[1]/div/table") %>% 
+  html_table()
+table = data.frame(table)
+```
+
+```{r Getting rid of "/u" and making a list of usernames}
+usernamelist = c()
+for(n in 1:length(table$Username)){
+  table$Username[n] = str_remove(table$Username[n], "u/")
+  usernamelist = append(usernamelist, table$Username[n])
+}
+
+table = table %>% mutate(author = Username)
+
+```
+
+```{r}
+
+user_comments = read_csv("user_comments.csv")
+
+user_comments = user_comments %>% anti_join(table)
+
+```
+
+```{r Cleaning Date-Times}
+user_comments <- user_comments %>% mutate(created = as_datetime(created), created_utc = as_datetime(created_utc), author_created_utc = as_datetime(author_created_utc), edited = as_datetime(edited)) 
+
+user_comments <- user_comments %>% mutate(time_to_post = created_utc - author_created_utc, timezone = created_utc-created)
+```
+
+```{r Cumulative Propthreads}
+user_comments = user_comments %>% group_by(author) %>% arrange(created) %>% mutate(cumulative_propthreads = cumsum(propaganda_thread)) %>% mutate(max_cumulative_propthreads = max(cumulative_propthreads))
+
+user_comments %>% group_by(author) %>% summarise(propaganda = mean(max_cumulative_propthreads)) %>% arrange(desc(propaganda))
+```
+
+
+```{r Mentions Candidate, warning=FALSE, echo=FALSE, message=FALSE}
+
+political_comments = user_comments %>% filter((str_detect(body, "trump")) | (str_detect(body, "donald")) | (str_detect(body, "hillary")) | (str_detect(body, "clinton")) | (str_detect(body, "sanders")) | (str_detect(body, "bernie")) | (str_detect(body, "Trump")) | (str_detect(body, "Donald")) | (str_detect(body, "Hillary")) | (str_detect(body, "Clinton")) | (str_detect(body, "Sanders")) | (str_detect(body, "Bernie")) | (str_detect(body, "democrat")) | (str_detect(body, "republican")) | (str_detect(body, "gop")) | (str_detect(body, "GOP")) | (str_detect(body, "Republican")) | (str_detect(body, "Democrat")) | (str_detect(body, "Dems "))| (str_detect(body, "dems "))| (str_detect(body, "DNC"))| (str_detect(body, "RNC"))) 
+
+```
+
+```{r}
+political_comments = political_comments %>% mutate(Bernie = case_when(
+         str_detect(body, "bernie") ~ 1,
+         str_detect(body, "Bernie") ~ 1,
+         str_detect(body, "sanders") ~ 1,
+         str_detect(body, "Sanders") ~ 1), Hillary = case_when(
+         str_detect(body, "hillary") ~ 1,
+         str_detect(body, "Hillary") ~ 1,
+         str_detect(body, "clinton") ~ 1,
+         str_detect(body, "Clinton") ~ 1), Donald = case_when(
+         str_detect(body, "donald") ~ 1,
+         str_detect(body, "Donald") ~ 1,
+         str_detect(body, "trump") ~ 1,
+         str_detect(body, "Trump") ~ 1), Democrat = case_when(
+         str_detect(body, "democrat") ~ 1, 
+         str_detect(body, "Democrat") ~ 1,
+         str_detect(body, "Dems ") ~ 1,
+         str_detect(body, "dems ") ~ 1,
+         str_detect(body, "DNC") ~ 1), Republican = case_when(
+         str_detect(body, "republican") ~ 1, 
+         str_detect(body, "gop") ~ 1,
+         str_detect(body, "GOP") ~ 1,
+         str_detect(body, "Republican") ~ 1,
+         str_detect(body, "RNC") ~ 1
+         ))
+
+political_comments$Bernie[is.na(political_comments$Bernie)==T]<-0
+political_comments$Hillary[is.na(political_comments$Hillary)==T]<-0
+political_comments$Donald[is.na(political_comments$Donald)==T]<-0
+political_comments$Democrat[is.na(political_comments$Democrat)==T]<-0
+political_comments$Republican[is.na(political_comments$Republican)==T]<-0
+```
+
+```{r}
+
+political_comments = political_comments %>% mutate(January = as.numeric(created<ymd("2016-02-01")), February = as.numeric(created < ymd("2016-03-01") & created >= ymd("2016-02-01")), March = as.numeric(created < ymd("2016-04-01") & created >= ymd("2016-03-01")), April = as.numeric(created < ymd("2016-05-01") & created >= ymd("2016-04-01")), May = as.numeric(created < ymd("2016-06-01") & created >= ymd("2016-05-01")), June = as.numeric(created < ymd("2016-07-01") & created >= ymd("2016-06-01")), July = as.numeric(created < ymd("2016-08-01") & created >= ymd("2016-07-01")), August = as.numeric(created < ymd("2016-09-01") & created >= ymd("2016-08-01")), September = as.numeric(created < ymd("2016-10-01") & created >= ymd("2016-09-01")), October = as.numeric(created < ymd("2016-11-01") & created >= ymd("2016-10-01")), November = as.numeric(created < ymd("2016-12-01") & created >= ymd("2016-11-01")), December = as.numeric(created < ymd("2017-01-01") & created >= ymd("2016-12-01")))
+  
+```
+
+```{r Drawing random political comments for classification}
+
+political_comments = political_comments %>% mutate(n = row_number())
+
+```
+
+```{r}
+
+commentsampler = function(z, x){
+  random_comments = c()
+  n = as.data.frame(sample(1:length(x$n), z)) %>% rename(n = "sample(1:length(x$n), z)")
+  random_comments = n %>% left_join(x)
+  return(random_comments)
+}
+
+random_comments = commentsampler(2000, political_comments)
+
+write_csv(sampled_comments, "sampled_comments.csv")
+
+
+```
+
+```{r Reading Together Random Set}
+
+random_comments = data.frame()
+x = 1
+for(n in 1:1637){
+  temp = read_csv(here("RandomHolder", paste0("rand_cache_",n,".csv")))
+  if(length(temp)>1){
+    temp = temp %>% select(-c(author_flair_text, author_flair_css_class))
+    random_comments = random_comments %>% bind_rows(temp)
+  }
+  print(x)
+  x = x+1
+}
+
+
+random_comments <- read_csv("random_comments.csv")
+```
+
+```{r Cleaning Date-Times Rand}
+random_comments <- random_comments %>% mutate(created = as_datetime(created), created_utc = as_datetime(created_utc), author_created_utc = as_datetime(author_created_utc), edited = as_datetime(edited)) 
+
+random_comments <- random_comments %>% mutate(time_to_post = created_utc - author_created_utc, timezone = created_utc-created)
+
+random_comments = random_comments %>% anti_join(table)
+```
+
+```{r Mentions Candidate, warning=FALSE, echo=FALSE, message=FALSE}
+
+political_random_comments = random_comments %>% filter((str_detect(body, "trump")) | (str_detect(body, "donald")) | (str_detect(body, "hillary")) | (str_detect(body, "clinton")) | (str_detect(body, "sanders")) | (str_detect(body, "bernie")) | (str_detect(body, "Trump")) | (str_detect(body, "Donald")) | (str_detect(body, "Hillary")) | (str_detect(body, "Clinton")) | (str_detect(body, "Sanders")) | (str_detect(body, "Bernie")) | (str_detect(body, "democrat")) | (str_detect(body, "republican")) | (str_detect(body, "gop")) | (str_detect(body, "GOP")) | (str_detect(body, "Republican")) | (str_detect(body, "Democrat")) | (str_detect(body, "Dems "))| (str_detect(body, "dems "))| (str_detect(body, "DNC"))| (str_detect(body, "RNC"))) 
+
+```
+
+```{r}
+political_random_comments = political_random_comments %>% mutate(Bernie = case_when(
+         str_detect(body, "bernie") ~ 1,
+         str_detect(body, "Bernie") ~ 1,
+         str_detect(body, "sanders") ~ 1,
+         str_detect(body, "Sanders") ~ 1), Hillary = case_when(
+         str_detect(body, "hillary") ~ 1,
+         str_detect(body, "Hillary") ~ 1,
+         str_detect(body, "clinton") ~ 1,
+         str_detect(body, "Clinton") ~ 1), Donald = case_when(
+         str_detect(body, "donald") ~ 1,
+         str_detect(body, "Donald") ~ 1,
+         str_detect(body, "trump") ~ 1,
+         str_detect(body, "Trump") ~ 1), Democrat = case_when(
+         str_detect(body, "democrat") ~ 1, 
+         str_detect(body, "Democrat") ~ 1,
+         str_detect(body, "Dems ") ~ 1,
+         str_detect(body, "dems ") ~ 1,
+         str_detect(body, "DNC") ~ 1), Republican = case_when(
+         str_detect(body, "republican") ~ 1, 
+         str_detect(body, "gop") ~ 1,
+         str_detect(body, "GOP") ~ 1,
+         str_detect(body, "Republican") ~ 1,
+         str_detect(body, "RNC") ~ 1
+         ))
+
+political_random_comments$Bernie[is.na(political_random_comments$Bernie)==T]<-0
+political_random_comments$Hillary[is.na(political_random_comments$Hillary)==T]<-0
+political_random_comments$Donald[is.na(political_random_comments$Donald)==T]<-0
+political_random_comments$Democrat[is.na(political_random_comments$Democrat)==T]<-0
+political_random_comments$Republican[is.na(political_random_comments$Republican)==T]<-0
+```
+
+```{r}
+
+political_random_comments = political_random_comments %>% mutate(January = as.numeric(created<ymd("2016-02-01")), February = as.numeric(created < ymd("2016-03-01") & created >= ymd("2016-02-01")), March = as.numeric(created < ymd("2016-04-01") & created >= ymd("2016-03-01")), April = as.numeric(created < ymd("2016-05-01") & created >= ymd("2016-04-01")), May = as.numeric(created < ymd("2016-06-01") & created >= ymd("2016-05-01")), June = as.numeric(created < ymd("2016-07-01") & created >= ymd("2016-06-01")), July = as.numeric(created < ymd("2016-08-01") & created >= ymd("2016-07-01")), August = as.numeric(created < ymd("2016-09-01") & created >= ymd("2016-08-01")), September = as.numeric(created < ymd("2016-10-01") & created >= ymd("2016-09-01")), October = as.numeric(created < ymd("2016-11-01") & created >= ymd("2016-10-01")), November = as.numeric(created < ymd("2016-12-01") & created >= ymd("2016-11-01")), December = as.numeric(created < ymd("2017-01-01") & created >= ymd("2016-12-01")))
+  
+```
+
+```{r}
+political_random_comments = political_random_comments %>% mutate(n = row_number())
+
+political_random_comments = political_random_comments %>% filter(author!="BitcoinAllBot") %>% filter(author!="SnapshillBot") %>% filter(!is.na(author)) %>% filter(author!="TweetPoster") %>% filter(author!="TotesMessenger")
+
+```
+
+```{r}
+random_random_comments = commentsampler(1000, political_random_comments)
+
+write_csv(random_random_comments, "random_random_comments.csv")
+```
+
+```{r}
+political_comments %>% group_by(author) %>% summarize(count = n()) %>% arrange(desc(count))
+
+political_random_comments %>% group_by(author) %>% summarize(count = n()) %>% arrange(desc(count))
+
+
+political_comments = political_comments %>% filter(author!="SnapshillBot") %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(author!="BitcoinAllBot") %>% filter(author!="autotldr") %>% filter(author!="Mentioned_Videos") %>% filter(author!="TotesMessenger") %>% ungroup()
+
+political_random_comments = political_random_comments %>% filter(author!="SnapshillBot") %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(author!="BitcoinAllBot") %>% filter(author!="autotldr") %>% filter(author!="Mentioned_Videos") %>% filter(author!="TotesMessenger") %>% ungroup()
+
+```
+
+
+
+```{r Reading in labelled comments and mutating to pull score_1 into the right columns}
+
+
+labelled_comments_exposed <- read_csv("random_comments_2.csv")
+
+labelled_comments_control <- read_csv("random_random_comments_2.csv")
+
+labelled_comments_control2 <- read_csv("new_data_to_label.csv") %>% select(-n)
+
+labelled_comments_control = labelled_comments_control %>% select(-author_created_utc, -created, -created_utc, -edited) %>% bind_rows(labelled_comments_control2)
+
+
+labelled_comments_exposed <- labelled_comments_exposed %>% mutate(
+  score_hillary = case_when(
+  is.na(score_hillary)==T & is.na(score_1)==F & Hillary==1 ~ score_1
+  ),
+  score_bernie = case_when(
+  is.na(score_bernie)==T & is.na(score_1)==F & Bernie==1 ~ score_1
+  ),
+  score_trump = case_when(
+  is.na(score_trump)==T & is.na(score_1)==F & Donald==1 ~ score_1
+  ),
+  score_rnc = case_when(
+  is.na(score_rnc)==T & is.na(score_1)==F & Republican==1 ~ score_1
+  ),
+  score_dnc = case_when(
+  is.na(score_dnc)==T & is.na(score_1)==F & Democrat==1 ~ score_1
+  )
+)
+
+
+labelled_comments_control <- labelled_comments_control %>% mutate(
+  score_hillary = case_when(
+  is.na(score_hillary)==T & is.na(score_1)==F & Hillary==1 ~ score_1
+  ),
+  score_bernie = case_when(
+  is.na(score_bernie)==T & is.na(score_1)==F & Bernie==1 ~ score_1
+  ),
+  score_trump = case_when(
+  is.na(score_trump)==T & is.na(score_1)==F & Donald==1 ~ score_1
+  ),
+  score_rnc = case_when(
+  is.na(score_rnc)==T & is.na(score_1)==F & Republican==1 ~ score_1
+  ),
+  score_dnc = case_when(
+  is.na(score_dnc)==T & is.na(score_1)==F & Democrat==1 ~ score_1
+  )
+)
+
+```
+
+```{r}
+
+quarterlist = c("Q1","Q2","Q3","Q4")
+
+```
+
+
+```{r Estimating Hillary Affinities - Exposed}
+
+labelled_exposed_hillary = labelled_comments_exposed %>% select(id, Hillary, score_hillary) %>% filter(Hillary==1) %>% filter(!is.na(score_hillary)) %>% mutate(TRAININGSET = 1)
+
+labelled_exposed_hillary = political_comments %>% filter(Hillary==1) %>% left_join(labelled_exposed_hillary, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_exposed_hillary_q1 = labelled_exposed_hillary %>% filter(January == 1 | February == 1 | March == 1)
+labelled_exposed_hillary_q1$TRAININGSET[is.na(labelled_exposed_hillary_q1$TRAININGSET)]<-0
+
+labelled_exposed_hillary_q2 = labelled_exposed_hillary %>% filter(April == 1 | May == 1 | June == 1)
+labelled_exposed_hillary_q2$TRAININGSET[is.na(labelled_exposed_hillary_q2$TRAININGSET)]<-0
+
+labelled_exposed_hillary_q3 = labelled_exposed_hillary %>% filter(July == 1 | August == 1 | September == 1)
+labelled_exposed_hillary_q3$TRAININGSET[is.na(labelled_exposed_hillary_q3$TRAININGSET)]<-0
+
+labelled_exposed_hillary_q4 = labelled_exposed_hillary %>% filter(October == 1 | November == 1 | December == 1)
+labelled_exposed_hillary_q4$TRAININGSET[is.na(labelled_exposed_hillary_q4$TRAININGSET)]<-0
+
+
+
+labelled_exposed_hillary_q1 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Exposed", "Q1", "control.txt"))
+
+labelled_exposed_hillary_q2 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Exposed", "Q2", "control.txt"))
+
+labelled_exposed_hillary_q3 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Exposed", "Q3", "control.txt"))
+
+labelled_exposed_hillary_q4 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Exposed", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_exposed_hillary_q1$body)){
+  sink(here("Hillary", "Exposed", "Q1", paste0(as.character(labelled_exposed_hillary_q1$n[x]),".txt")))
+  cat(labelled_exposed_hillary_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_hillary_q2$body)){
+  sink(here("Hillary", "Exposed", "Q2", paste0(as.character(labelled_exposed_hillary_q2$n[x]),".txt")))
+  cat(labelled_exposed_hillary_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_hillary_q3$body)){
+  sink(here("Hillary", "Exposed", "Q3", paste0(as.character(labelled_exposed_hillary_q3$n[x]),".txt")))
+  cat(labelled_exposed_hillary_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_hillary_q4$body)){
+  sink(here("Hillary", "Exposed", "Q4", paste0(as.character(labelled_exposed_hillary_q4$n[x]),".txt")))
+  cat(labelled_exposed_hillary_q4$body[x])
+  sink()
+}
+
+
+```
+
+
+
+
+```{r Estimating Hillary Affinities - Control}
+
+labelled_control_hillary = labelled_comments_control %>% select(id, Hillary, score_hillary) %>% filter(Hillary==1) %>% filter(!is.na(score_hillary)) %>% mutate(TRAININGSET = 1)
+
+labelled_control_hillary = political_random_comments %>% filter(Hillary==1) %>% left_join(labelled_control_hillary, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_control_hillary_q1 = labelled_control_hillary %>% filter(January == 1 | February == 1 | March == 1)
+labelled_control_hillary_q1$TRAININGSET[is.na(labelled_control_hillary_q1$TRAININGSET)]<-0
+
+labelled_control_hillary_q2 = labelled_control_hillary %>% filter(April == 1 | May == 1 | June == 1)
+labelled_control_hillary_q2$TRAININGSET[is.na(labelled_control_hillary_q2$TRAININGSET)]<-0
+
+labelled_control_hillary_q3 = labelled_control_hillary %>% filter(July == 1 | August == 1 | September == 1)
+labelled_control_hillary_q3$TRAININGSET[is.na(labelled_control_hillary_q3$TRAININGSET)]<-0
+
+labelled_control_hillary_q4 = labelled_control_hillary %>% filter(October == 1 | November == 1 | December == 1)
+labelled_control_hillary_q4$TRAININGSET[is.na(labelled_control_hillary_q4$TRAININGSET)]<-0
+
+
+
+labelled_control_hillary_q1 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Control", "Q1", "control.txt"))
+
+labelled_control_hillary_q2 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Control", "Q2", "control.txt"))
+
+labelled_control_hillary_q3 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Control", "Q3", "control.txt"))
+
+labelled_control_hillary_q4 %>% select(ROWID = n, TRUTH = score_hillary, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Hillary", "Control", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_control_hillary_q1$body)){
+  sink(here("Hillary", "Control", "Q1", paste0(as.character(labelled_control_hillary_q1$n[x]),".txt")))
+  cat(labelled_control_hillary_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_hillary_q2$body)){
+  sink(here("Hillary", "Control", "Q2", paste0(as.character(labelled_control_hillary_q2$n[x]),".txt")))
+  cat(labelled_control_hillary_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_hillary_q3$body)){
+  sink(here("Hillary", "Control", "Q3", paste0(as.character(labelled_control_hillary_q3$n[x]),".txt")))
+  cat(labelled_control_hillary_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_hillary_q4$body)){
+  sink(here("Hillary", "Control", "Q4", paste0(as.character(labelled_control_hillary_q4$n[x]),".txt")))
+  cat(labelled_control_hillary_q4$body[x])
+  sink()
+}
+
+
+
+```
+
+```{r Estimating Bernie Affinities - Exposed}
+
+labelled_exposed_bernie = labelled_comments_exposed %>% select(id, Bernie, score_bernie) %>% filter(Bernie==1) %>% filter(!is.na(score_bernie)) %>% mutate(TRAININGSET = 1)
+
+labelled_exposed_bernie = political_comments %>% filter(Bernie==1) %>% left_join(labelled_exposed_bernie, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_exposed_bernie_q1 = labelled_exposed_bernie %>% filter(January == 1 | February == 1 | March == 1)
+labelled_exposed_bernie_q1$TRAININGSET[is.na(labelled_exposed_bernie_q1$TRAININGSET)]<-0
+
+labelled_exposed_bernie_q2 = labelled_exposed_bernie %>% filter(April == 1 | May == 1 | June == 1)
+labelled_exposed_bernie_q2$TRAININGSET[is.na(labelled_exposed_bernie_q2$TRAININGSET)]<-0
+
+labelled_exposed_bernie_q3 = labelled_exposed_bernie %>% filter(July == 1 | August == 1 | September == 1)
+labelled_exposed_bernie_q3$TRAININGSET[is.na(labelled_exposed_bernie_q3$TRAININGSET)]<-0
+
+labelled_exposed_bernie_q4 = labelled_exposed_bernie %>% filter(October == 1 | November == 1 | December == 1)
+labelled_exposed_bernie_q4$TRAININGSET[is.na(labelled_exposed_bernie_q4$TRAININGSET)]<-0
+
+
+
+labelled_exposed_bernie_q1 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Exposed", "Q1", "control.txt"))
+
+labelled_exposed_bernie_q2 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Exposed", "Q2", "control.txt"))
+
+labelled_exposed_bernie_q3 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Exposed", "Q3", "control.txt"))
+
+labelled_exposed_bernie_q4 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Exposed", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_exposed_bernie_q1$body)){
+  sink(here("Bernie", "Exposed", "Q1", paste0(as.character(labelled_exposed_bernie_q1$n[x]),".txt")))
+  cat(labelled_exposed_bernie_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_bernie_q2$body)){
+  sink(here("Bernie", "Exposed", "Q2", paste0(as.character(labelled_exposed_bernie_q2$n[x]),".txt")))
+  cat(labelled_exposed_bernie_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_bernie_q3$body)){
+  sink(here("Bernie", "Exposed", "Q3", paste0(as.character(labelled_exposed_bernie_q3$n[x]),".txt")))
+  cat(labelled_exposed_bernie_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_bernie_q4$body)){
+  sink(here("Bernie", "Exposed", "Q4", paste0(as.character(labelled_exposed_bernie_q4$n[x]),".txt")))
+  cat(labelled_exposed_bernie_q4$body[x])
+  sink()
+}
+
+ 
+```
+
+
+
+```{r Estimating Bernie Affinities - Control}
+
+labelled_control_bernie = labelled_comments_control %>% select(id, Bernie, score_bernie) %>% filter(Bernie==1) %>% filter(!is.na(score_bernie)) %>% mutate(TRAININGSET = 1)
+
+labelled_control_bernie = political_random_comments %>% filter(Bernie==1) %>% left_join(labelled_control_bernie, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_control_bernie_q1 = labelled_control_bernie %>% filter(January == 1 | February == 1 | March == 1)
+labelled_control_bernie_q1$TRAININGSET[is.na(labelled_control_bernie_q1$TRAININGSET)]<-0
+
+labelled_control_bernie_q2 = labelled_control_bernie %>% filter(April == 1 | May == 1 | June == 1)
+labelled_control_bernie_q2$TRAININGSET[is.na(labelled_control_bernie_q2$TRAININGSET)]<-0
+
+labelled_control_bernie_q3 = labelled_control_bernie %>% filter(July == 1 | August == 1 | September == 1)
+labelled_control_bernie_q3$TRAININGSET[is.na(labelled_control_bernie_q3$TRAININGSET)]<-0
+
+labelled_control_bernie_q4 = labelled_control_bernie %>% filter(October == 1 | November == 1 | December == 1)
+labelled_control_bernie_q4$TRAININGSET[is.na(labelled_control_bernie_q4$TRAININGSET)]<-0
+
+
+
+labelled_control_bernie_q1 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Control", "Q1", "control.txt"))
+
+labelled_control_bernie_q2 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Control", "Q2", "control.txt"))
+
+labelled_control_bernie_q3 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Control", "Q3", "control.txt"))
+
+labelled_control_bernie_q4 %>% select(ROWID = n, TRUTH = score_bernie, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Bernie", "Control", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_control_bernie_q1$body)){
+  sink(here("Bernie", "Control", "Q1", paste0(as.character(labelled_control_bernie_q1$n[x]),".txt")))
+  cat(labelled_control_bernie_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_bernie_q2$body)){
+  sink(here("Bernie", "Control", "Q2", paste0(as.character(labelled_control_bernie_q2$n[x]),".txt")))
+  cat(labelled_control_bernie_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_bernie_q3$body)){
+  sink(here("Bernie", "Control", "Q3", paste0(as.character(labelled_control_bernie_q3$n[x]),".txt")))
+  cat(labelled_control_bernie_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_bernie_q4$body)){
+  sink(here("Bernie", "Control", "Q4", paste0(as.character(labelled_control_bernie_q4$n[x]),".txt")))
+  cat(labelled_control_bernie_q4$body[x])
+  sink()
+}
+
+ 
+```
+
+```{r Estimating Trump Affinities - Exposed}
+
+labelled_exposed_donald = labelled_comments_exposed %>% select(id, Donald, score_trump) %>% filter(Donald==1) %>% filter(!is.na(score_trump)) %>% mutate(TRAININGSET = 1)
+
+labelled_exposed_donald = political_comments %>% filter(Donald==1) %>% left_join(labelled_exposed_donald, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_exposed_donald_q1 = labelled_exposed_donald %>% filter(January == 1 | February == 1 | March == 1)
+labelled_exposed_donald_q1$TRAININGSET[is.na(labelled_exposed_donald_q1$TRAININGSET)]<-0
+
+labelled_exposed_donald_q2 = labelled_exposed_donald %>% filter(April == 1 | May == 1 | June == 1)
+labelled_exposed_donald_q2$TRAININGSET[is.na(labelled_exposed_donald_q2$TRAININGSET)]<-0
+
+labelled_exposed_donald_q3 = labelled_exposed_donald %>% filter(July == 1 | August == 1 | September == 1)
+labelled_exposed_donald_q3$TRAININGSET[is.na(labelled_exposed_donald_q3$TRAININGSET)]<-0
+
+labelled_exposed_donald_q4 = labelled_exposed_donald %>% filter(October == 1 | November == 1 | December == 1)
+labelled_exposed_donald_q4$TRAININGSET[is.na(labelled_exposed_donald_q4$TRAININGSET)]<-0
+
+
+
+labelled_exposed_donald_q1 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Exposed", "Q1", "control.txt"))
+
+labelled_exposed_donald_q2 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Exposed", "Q2", "control.txt"))
+
+labelled_exposed_donald_q3 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Exposed", "Q3", "control.txt"))
+
+labelled_exposed_donald_q4 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Exposed", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_exposed_donald_q1$body)){
+  sink(here("Donald", "Exposed", "Q1", paste0(as.character(labelled_exposed_donald_q1$n[x]),".txt")))
+  cat(labelled_exposed_donald_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_donald_q2$body)){
+  sink(here("Donald", "Exposed", "Q2", paste0(as.character(labelled_exposed_donald_q2$n[x]),".txt")))
+  cat(labelled_exposed_donald_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_donald_q3$body)){
+  sink(here("Donald", "Exposed", "Q3", paste0(as.character(labelled_exposed_donald_q3$n[x]),".txt")))
+  cat(labelled_exposed_donald_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_exposed_donald_q4$body)){
+  sink(here("Donald", "Exposed", "Q4", paste0(as.character(labelled_exposed_donald_q4$n[x]),".txt")))
+  cat(labelled_exposed_donald_q4$body[x])
+  sink()
+}
+
+
+ 
+```
+
+
+
+```{r Estimating Trump Affinities - Control}
+
+labelled_control_donald = labelled_comments_control %>% select(id, Donald, score_trump) %>% filter(Donald==1) %>% filter(!is.na(score_trump)) %>% mutate(TRAININGSET = 1)
+
+labelled_control_donald = political_random_comments %>% filter(Donald==1) %>% left_join(labelled_control_donald, by = c("id"="id")) %>% filter(author!="PoliticsModeratorBot") %>% filter(author!="SnapshillBot") %>% filter(author!="TheWallGrows") %>% filter(author!="TweetPoster") %>% filter(!str_detect(body, "Thank you for participating in")) 
+
+labelled_control_donald_q1 = labelled_control_donald %>% filter(January == 1 | February == 1 | March == 1)
+labelled_control_donald_q1$TRAININGSET[is.na(labelled_control_donald_q1$TRAININGSET)]<-0
+
+labelled_control_donald_q2 = labelled_control_donald %>% filter(April == 1 | May == 1 | June == 1)
+labelled_control_donald_q2$TRAININGSET[is.na(labelled_control_donald_q2$TRAININGSET)]<-0
+
+labelled_control_donald_q3 = labelled_control_donald %>% filter(July == 1 | August == 1 | September == 1)
+labelled_control_donald_q3$TRAININGSET[is.na(labelled_control_donald_q3$TRAININGSET)]<-0
+
+labelled_control_donald_q4 = labelled_control_donald %>% filter(October == 1 | November == 1 | December == 1)
+labelled_control_donald_q4$TRAININGSET[is.na(labelled_control_donald_q4$TRAININGSET)]<-0
+
+
+labelled_control_donald_q1 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Control", "Q1", "control.txt"))
+
+labelled_control_donald_q2 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Control", "Q2", "control.txt"))
+
+labelled_control_donald_q3 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Control", "Q3", "control.txt"))
+
+labelled_control_donald_q4 %>% select(ROWID = n, TRUTH = score_trump, TRAININGSET) %>% mutate(ROWID = paste0(ROWID,".txt")) %>% write_csv(here("Donald", "Control", "Q4", "control.txt"))
+
+
+for(x in 1:length(labelled_control_donald_q1$body)){
+  sink(here("Donald", "Control", "Q1", paste0(as.character(labelled_control_donald_q1$n[x]),".txt")))
+  cat(labelled_control_donald_q1$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_donald_q2$body)){
+  sink(here("Donald", "Control", "Q2", paste0(as.character(labelled_control_donald_q2$n[x]),".txt")))
+  cat(labelled_control_donald_q2$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_donald_q3$body)){
+  sink(here("Donald", "Control", "Q3", paste0(as.character(labelled_control_donald_q3$n[x]),".txt")))
+  cat(labelled_control_donald_q3$body[x])
+  sink()
+}
+
+for(x in 1:length(labelled_control_donald_q4$body)){
+  sink(here("Donald", "Control", "Q4", paste0(as.character(labelled_control_donald_q4$n[x]),".txt")))
+  cat(labelled_control_donald_q4$body[x])
+  sink()
+}
+
+ 
+```
+
+```{r}
+targetlist = c("Hillary", "Bernie", "Donald")
+grouplist = c("Exposed", "Control")
+quarterlist = c("Q1", "Q2", "Q3", "Q4")
+featurelist = c(15, 12, 10, 8, 6, 4)
+
+for(quarter in quarterlist){
+  for(target in targetlist){
+    for(group in grouplist){
+      set.seed(1989)
+      oldwd<-getwd()
+      setwd(here(target, group, quarter))
+      undergrad.results = undergrad(sep = ",", control="control.txt", python3= TRUE)
+      undergrad.preprocess <- preprocess(undergrad.results)
+      readme.results <- NULL
+      for(features in featurelist){
+        try(readme.results <- readme(undergrad.preprocess, features = features, nboot = 50, boot.se=T))
+        if(!is.null(readme.results)){
+          break
+        }
+      }
+      assign(paste0("results_", target, "_", group, "_", quarter), readme.results)
+      setwd(oldwd)
+    }
+  }
+}
+
+# If this takes too long, try just saving bits of the output.
+```
+
