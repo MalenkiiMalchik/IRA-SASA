@@ -1,1 +1,5 @@
 # IRA-SASA
+
+This project involved scraping a list of Reddit accounts that the platform believes to be owned by Russia's Internet Research Agency and then using Python to query the Pushshift.io Reddit API to obtain the 2016 comments of users who were exposed to those propaganda accounts. A synthetic control set was also created by drawing random users who had not been exposed to propaganda but who commented at random times during the same year in a random sample of subreddits weighted according to the exposed users' commenting behavior. This code can be found in the files "PSAW_call_python.py" and "QuickClean.R". 
+
+The comments for each group were then broken into those that mentioned the candidates Hillary Clinton, Bernie Sanders, and Donald Trump, and further into quarter. Supervised Aggregate Sentiment Analysis was applied using the ReadMe package, which in turn is based on the VA (Verbal Autopsy) package in R. This code is found in the file titled "IRA - Supervised Aggregate Sentiment Analysis.rmd".
